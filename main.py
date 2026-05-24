@@ -1,13 +1,16 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.core.config import settings
 from app.db.database import engine
 from app.models import Base
 from app.routers.auth import router as auth_router
+from app.routers.conversations import router as conversations_router
 
 
 @asynccontextmanager
@@ -39,7 +42,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    missing = [e["loc"][-1] for e in exc.errors() if e["type"] == "missing"]
+    if missing:
+        message = f"Missing required field(s): {', '.join(missing)}"
+    else:
+        message = str(exc.errors()[0].get("msg", "Invalid request"))
+    return JSONResponse(
+        status_code=400,
+        content={"error": {"code": "MISSING_FIELD", "message": message}},
+    )
+
+
 app.include_router(auth_router)
+app.include_router(conversations_router)
 
 
 @app.get("/")
