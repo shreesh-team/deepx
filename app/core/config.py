@@ -11,5 +11,8 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 20
     DB_POOL_PRE_PING: bool = True
 
+    # CORS — comma-separated list of allowed origins, or "*" for all
+    CORS_ORIGINS: str = "*"
+
 
 settings = Settings()
