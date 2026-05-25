@@ -82,6 +82,16 @@ class MessageResponse(BaseModel):
         )
 
 
+class MessageTurn(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    api_key: str
+    context: list[MessageTurn]
+
+
 class ConversationDetailResponse(BaseModel):
     id: str
     title: str | None

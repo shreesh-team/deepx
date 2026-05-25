@@ -14,5 +14,7 @@ class Settings(BaseSettings):
     # CORS — comma-separated list of allowed origins, or "*" for all
     CORS_ORIGINS: str = "*"
 
+    GEMINI_API_KEY: str | None = None
+
 
 settings = Settings()
