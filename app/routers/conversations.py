@@ -1,5 +1,6 @@
 import json
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.database import AsyncSessionLocal, get_db
 from app.models.conversation import Conversation, Message
+from app.models.inference import InferenceLog
 from app.schemas.conversation import (
     AddMessageRequest,
     ChatRequest,
@@ -22,7 +24,12 @@ from app.schemas.conversation import (
 router = APIRouter(prefix="/api/conversations")
 
 
-async def _stream_and_save(api_key: str, context: list, conversation_id: uuid.UUID):
+_PREVIEW_MAX = 500
+
+
+async def _stream_and_save(
+    api_key: str, context: list, conversation_id: uuid.UUID, model: str, provider: str
+):
     from google import genai
 
     contents = [
@@ -32,38 +39,65 @@ async def _stream_and_save(api_key: str, context: list, conversation_id: uuid.UU
 
     client = genai.Client(api_key=api_key)
     full_response = []
+    usage = None
+    status = "success"
+    error_message = None
+    requested_at = datetime.now(timezone.utc)
 
     try:
         async for chunk in await client.aio.models.generate_content_stream(
-            model="gemini-3-flash-preview",
+            model=model,
             contents=contents,
         ):
+            if getattr(chunk, "usage_metadata", None):
+                usage = chunk.usage_metadata
             text = chunk.text or ""
             if text:
                 full_response.append(text)
                 yield f"data: {json.dumps({'text': text})}\n\n"
     except Exception as e:
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
-        return
+        status = "error"
+        error_message = str(e)
+        yield f"data: {json.dumps({'error': error_message})}\n\n"
 
+    responded_at = datetime.now(timezone.utc)
+    latency_ms = int((responded_at - requested_at).total_seconds() * 1000)
     complete = "".join(full_response)
-    if complete:
-        async with AsyncSessionLocal() as session:
+
+    input_text = next((t.content for t in reversed(context) if t.role == "user"), None)
+
+    async with AsyncSessionLocal() as session:
+        if complete:
             max_seq = await session.scalar(
                 select(func.max(Message.sequence)).where(Message.conversation_id == conversation_id)
             )
             next_seq = (max_seq + 1) if max_seq is not None else 0
-            msg = Message(
+            session.add(Message(
                 conversation_id=conversation_id,
                 role="assistant",
                 content=complete,
                 sequence=next_seq,
-            )
-            session.add(msg)
+            ))
             await session.execute(
                 update(Conversation).where(Conversation.id == conversation_id).values(updated_at=func.now())
             )
-            await session.commit()
+
+        session.add(InferenceLog(
+            conversation_id=conversation_id,
+            model=model,
+            provider=provider,
+            status=status,
+            error_message=error_message,
+            latency_ms=latency_ms,
+            input_tokens=getattr(usage, "prompt_token_count", None),
+            output_tokens=getattr(usage, "candidates_token_count", None),
+            total_tokens=getattr(usage, "total_token_count", None),
+            input_preview=input_text[:_PREVIEW_MAX] if input_text else None,
+            output_preview=complete[:_PREVIEW_MAX] if complete else None,
+            requested_at=requested_at,
+            responded_at=responded_at,
+        ))
+        await session.commit()
 
     yield "data: [DONE]\n\n"
 
@@ -197,7 +231,7 @@ async def chat(conversation_id: str, body: ChatRequest, db: AsyncSession = Depen
     api_key = settings.GEMINI_API_KEY or body.api_key
 
     return StreamingResponse(
-        _stream_and_save(api_key, body.context, cid),
+        _stream_and_save(api_key, body.context, cid, conversation.model, conversation.provider),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

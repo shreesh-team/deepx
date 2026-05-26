@@ -1,13 +1,19 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.database import get_db
 from app.models.inference import InferenceLog
-from app.schemas.inference import IngestRequest, IngestResponse
+from app.schemas.inference import (
+    InferenceLogResponse,
+    IngestRequest,
+    IngestResponse,
+    PaginatedInferenceLogsResponse,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -46,3 +52,37 @@ async def ingest(
     await db.commit()
     await db.refresh(log)
     return IngestResponse(id=str(log.id))
+
+
+@router.get("/inference-logs", response_model=PaginatedInferenceLogsResponse)
+async def list_inference_logs(
+    status: str | None = Query(None),
+    model: str | None = Query(None),
+    conversation_id: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    filters = []
+    if status:
+        filters.append(InferenceLog.status == status)
+    if model:
+        filters.append(InferenceLog.model == model)
+    if conversation_id:
+        filters.append(InferenceLog.conversation_id == conversation_id)
+
+    base = select(InferenceLog).where(*filters)
+
+    total = await db.scalar(select(func.count()).select_from(base.subquery()))
+    rows = await db.scalars(
+        base.order_by(InferenceLog.created_at.desc())
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+    )
+
+    return PaginatedInferenceLogsResponse(
+        items=[InferenceLogResponse.from_orm(r) for r in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
