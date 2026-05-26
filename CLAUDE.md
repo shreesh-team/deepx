@@ -12,7 +12,7 @@ User → Chatbot UI → [SDK Wrapper] → LLM API
                   Ingestion API → Database
 ```
 
-The FastAPI backend serves as the **Ingestion API** — receiving logs from the SDK wrapper, validating them, and persisting them to PostgreSQL. The schema should capture messages, sessions, and per-call metadata (latency, tokens, success/failure).
+The FastAPI backend serves as both the **Ingestion API** and a **chat proxy** — receiving and persisting conversation logs, and streaming LLM responses via the Google Gemini API.
 
 ## Commands
 
@@ -34,11 +34,49 @@ uv run python -c "..."
 
 ## Architecture
 
-**Entry point**: `main.py` — defines the FastAPI `app` and the `lifespan` context manager. The lifespan runs a `SELECT 1` health check against PostgreSQL on startup (prints `[DB] PostgreSQL connection: OK` or a failure message) and disposes the connection pool on shutdown.
+**Entry point**: `main.py` — defines the FastAPI `app` and the `lifespan` context manager. The lifespan runs a `SELECT 1` health check, runs `Base.metadata.create_all` to auto-create tables, and disposes the connection pool on shutdown. Also registers CORS middleware (origins from `CORS_ORIGINS` env var) and a global `RequestValidationError` handler that returns structured `{"error": {"code": ..., "message": ...}}` JSON.
 
-**Config** (`app/core/config.py`): `pydantic-settings` `Settings` class reads all config from `.env`. The `DATABASE_URL` must use the `postgresql+asyncpg://` scheme. Pool settings (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_PRE_PING`) are also configurable via env.
+**Config** (`app/core/config.py`): `pydantic-settings` `Settings` class reads all config from `.env`. Key settings:
+- `DATABASE_URL` — must use `postgresql+asyncpg://` scheme
+- `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_PRE_PING` — connection pool tuning
+- `CORS_ORIGINS` — comma-separated allowed origins, defaults to `"*"`
+- `GEMINI_API_KEY` — optional; if set, overrides the per-request `api_key` in chat requests
 
-**Database** (`app/db/database.py`): Creates a SQLAlchemy 2.0 async engine and an `async_sessionmaker`. The `get_db()` async generator is the standard FastAPI dependency for per-request sessions.
+**Database** (`app/db/database.py`): Creates a SQLAlchemy 2.0 async engine and an `async_sessionmaker` (`AsyncSessionLocal`). The `get_db()` async generator is the standard FastAPI dependency for per-request sessions. `AsyncSessionLocal` is also used directly inside the streaming generator (which runs outside the request lifecycle).
+
+**Security** (`app/core/security.py`): Password hashing via `hashlib.pbkdf2_hmac` (SHA-256, 260k iterations) with a 32-byte random salt. No JWT — auth endpoints return user data directly; session management is left to the client.
+
+## Models
+
+All models use `app/models/base.py` (`DeclarativeBase`). Tables are auto-created on startup.
+
+- **`User`** (`users`): `id` (int PK), `name`, `email` (unique), `password` (hashed), `created_at`
+- **`Conversation`** (`conversations`): `id` (UUID PK), `title`, `model`, `provider`, `status` (default `"active"`), `created_at`, `updated_at`. Indexed on `updated_at`.
+- **`Message`** (`messages`): `id` (UUID PK), `conversation_id` (FK → conversations, CASCADE), `role`, `content`, `sequence` (int, unique per conversation). Indexed on `conversation_id`.
+
+## API Routes
+
+### Auth (`app/routers/auth.py`)
+- `POST /register` — create user; 409 if email taken
+- `POST /login` — verify credentials; 401 on failure
+
+### Conversations (`app/routers/conversations.py`, prefix `/api/conversations`)
+- `POST /api/conversations` — create conversation (`model`, `provider` required)
+- `GET /api/conversations` — list all, ordered by `updated_at` desc
+- `GET /api/conversations/{id}` — get conversation with messages
+- `PATCH /api/conversations/{id}/cancel` — set status to `"cancelled"`
+- `POST /api/conversations/{id}/messages` — append a message (`role` ∈ `{user, assistant, system}`)
+- `POST /api/conversations/{id}/chat` — stream a Gemini response (SSE); saves assistant reply and bumps `updated_at`
+
+### Chat streaming detail
+The `_stream_and_save` async generator calls `google-genai` (`gemini-3-flash-preview`) with SSE chunks formatted as `data: {"text": "..."}`. On completion it opens a new `AsyncSessionLocal` session to persist the assistant message (sequence auto-incremented) and update `updated_at`. Terminates with `data: [DONE]`.
+
+## Schemas (`app/schemas/`)
+
+- `user.py`: `RegisterRequest`, `LoginRequest`, `UserResponse`
+- `conversation.py`: `CreateConversationRequest`, `ConversationResponse`, `ConversationListItem`, `AddMessageRequest`, `MessageResponse`, `MessageTurn`, `ChatRequest`, `ConversationDetailResponse`
+
+All schemas use manual `from_orm` class methods rather than Pydantic's `model_validate` / `from_attributes`.
 
 ## Environment
 
@@ -46,6 +84,8 @@ Copy `.env.example` to `.env` and fill in credentials before running:
 
 ```
 DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/deepx
+CORS_ORIGINS=http://localhost:3000
+GEMINI_API_KEY=your_key_here   # optional
 ```
 
 `.env` is gitignored. Never commit it.
