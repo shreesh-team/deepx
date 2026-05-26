@@ -11,6 +11,7 @@ from app.db.database import engine
 from app.models import Base
 from app.routers.auth import router as auth_router
 from app.routers.conversations import router as conversations_router
+from app.routers.ingestion import router as ingestion_router
 
 
 @asynccontextmanager
@@ -57,6 +58,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
 app.include_router(auth_router)
 app.include_router(conversations_router)
+app.include_router(ingestion_router)
 
 
 @app.get("/")

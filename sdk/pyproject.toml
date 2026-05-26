@@ -1,0 +1,8 @@
+[project]
+name = "deepx-sdk"
+version = "0.1.0"
+description = "Lightweight SDK for DeepX LLM observability"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+]

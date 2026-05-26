@@ -16,5 +16,8 @@ class Settings(BaseSettings):
 
     GEMINI_API_KEY: str | None = None
 
+    # Ingestion auth — if set, SDK must send this as a Bearer token
+    DEEPX_INGEST_API_KEY: str | None = None
+
 
 settings = Settings()
